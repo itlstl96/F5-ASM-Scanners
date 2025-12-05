@@ -1,86 +1,74 @@
-<#
-.SYNOPSIS
-    Export F5 ASM/WAF Security Policies
-
-.DESCRIPTION
-    Queries a BIG-IP device for ASM security policies and saves them
-    to a local file in the format: PolicyName:PolicyID
-
-.AUTHOR
-    PGV
-#>
-
-param(
+param (
     [Parameter(Mandatory=$true)]
     [string]$BigIPHost,
 
     [Parameter(Mandatory=$true)]
-    [string]$User,
+    [int]$Port,
 
-    [int]$Port = 8443
+    [Parameter(Mandatory=$true)]
+    [string]$User
 )
 
-# -----------------------------
-# Banner
-# -----------------------------
-Write-Host "================================================" -ForegroundColor Cyan
-Write-Host "        ⚠  F5 - ASM POLICIES LISTER  (CLI MODE)" -ForegroundColor Cyan
-Write-Host "================================================" -ForegroundColor Cyan
-Write-Host "Author: PGV`n" -ForegroundColor Green
-
-# -----------------------------
 # Prompt for password securely
-# -----------------------------
-$Password = Read-Host -AsSecureString "🔐 Enter password for user '$User'"
+$Password = Read-Host -Prompt "Enter password for $User" -AsSecureString
+
+# Convert secure password → plain text
 $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password)
 $PlainPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
 [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
 
-# -----------------------------
-# Config
-# -----------------------------
-$OutputFile = "ASM_security_policies.txt"
-$BaseUrl = "https://$BigIPHost`:$Port/mgmt/tm/asm/policies"
+# Force TLS 1.2 for BIG-IP REST API
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-# Create a WebSession
-$Headers = @{
-    "Content-Type" = "application/json"
-}
+# Disable SSL certificate validation (BIG-IP often uses self‑signed certs)
+[System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
 
-# -----------------------------
-# Fetch policies
-# -----------------------------
+# Build URL using input Port
+$Url = "https://$BigIPHost`:$Port/mgmt/tm/asm/policies"
+
+# Prepare HTTP request
+$AuthString = "$User`:$PlainPassword"
+$AuthHeader = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($AuthString))
+
+$request = [System.Net.HttpWebRequest]::Create($Url)
+$request.Method = "GET"
+$request.Headers["Authorization"] = "Basic $AuthHeader"
+$request.Accept = "application/json"
+
+# Send request
 try {
-    $Response = Invoke-RestMethod -Uri $BaseUrl -Method Get -Headers $Headers -Credential (New-Object System.Management.Automation.PSCredential($User, $Password)) -SkipCertificateCheck
+    $response = $request.GetResponse()
 } catch {
-    Write-Error "❌ Connection error while fetching policies: $_"
+    Write-Host "ERROR: Cannot connect to BIG-IP at $BigIPHost on port $Port"
+    Write-Host $_.Exception.Message
     exit 1
 }
 
-if (-not $Response.items) {
-    Write-Warning "⚠ No policies found or request failed."
-    exit 0
-}
+# Read response JSON
+$stream = $response.GetResponseStream()
+$reader = New-Object System.IO.StreamReader($stream)
+$json = $reader.ReadToEnd()
+$reader.Close()
 
-# -----------------------------
-# Print and save policies
-# -----------------------------
-Write-Host "`n📌 Found $($Response.items.Count) security policies`n"
+# Convert to PowerShell object
+$data = $json | ConvertFrom-Json
 
-$Response.items | ForEach-Object {
-    $PolicyName = $_.name
-    $PolicyID   = $_.id
-    Write-Host "$PolicyName : $PolicyID"
-} 
+# Prepare output file path
+$OutputFile = Join-Path -Path (Get-Location) -ChildPath "ASM_Policies_Export.txt"
 
-# Write to file
-try {
-    $Response.items | ForEach-Object {
-        "$($_.name):$($_.id)" | Out-File -FilePath $OutputFile -Encoding utf8 -Append
+# Output policies to console and file
+if ($data.items) {
+    $outputLines = @()
+    foreach ($policy in $data.items) {
+        $policyId = if ($policy.id) { $policy.id } else { "N/A" }
+        $line = "$($policy.name) : $policyId"
+        Write-Output $line          # console
+        $outputLines += $line       # collect for file
     }
-
-    Write-Host "`n✅ Policies saved to $OutputFile" -ForegroundColor Green
-} catch {
-    Write-Error "❌ Error writing file: $_"
-    exit 1
+    # Save to text file
+    $outputLines | Out-File -FilePath $OutputFile -Encoding UTF8
+    Write-Host "Policies exported to $OutputFile"
+} else {
+    Write-Host "No policies found."
+    "No policies found." | Out-File -FilePath $OutputFile -Encoding UTF8
 }
