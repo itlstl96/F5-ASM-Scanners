@@ -1,5 +1,7 @@
 .\Export-ASM-Policies.ps1 -BigIPHost 192.168.1.220 -Port 8443 -User admin
+
 .\Scan-ASM-Entities.ps1 -BigIPHost 192.168.1.220 -Port 8443 -User admin -InputFile ASM_Policies_Export.txt
+
 .\Scan-ASM-Signatures.ps1 -BigIPHost 192.168.1.220 -Port 8443 -User admin -InputFile ASM_Policies_Export.txt
 
 
