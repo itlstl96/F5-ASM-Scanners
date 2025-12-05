@@ -1,3 +1,8 @@
+.\Export-ASM-Policies.ps1 -BigIPHost 192.168.1.220 -Port 8443 -User admin
+.\Scan-ASM-Entities.ps1 -BigIPHost 192.168.1.220 -Port 8443 -User admin -InputFile ASM_Policies_Export.txt
+.\Scan-ASM-Signatures.ps1 -BigIPHost 192.168.1.220 -Port 8443 -User admin -InputFile ASM_Policies_Export.txt
+
+
 1. List ASM policies in format [security policy name] : [security policy id]
 
 `pwsh ./Export-ASM-Policies.ps1 -BigIPHost 192.168.1.x -User admin`
