@@ -1,101 +1,46 @@
-<#
-.SYNOPSIS
-    Scan F5 ASM/WAF Entity Configs
-
-.DESCRIPTION
-    Queries a BIG-IP device for ASM entity configurations from enabled security policies
-    and exports results to CSV.
-
-.AUTHOR
-    PGV
-#>
-
-param(
+param (
     [Parameter(Mandatory=$true)]
     [string]$BigIPHost,
+
+    [Parameter(Mandatory=$true)]
+    [int]$Port,
 
     [Parameter(Mandatory=$true)]
     [string]$User,
 
     [Parameter(Mandatory=$true)]
-    [string]$PolicyFile,
-
-    [int]$Port = 8443
+    [string]$InputFile
 )
-
-# -----------------------------
-# Banner
-# -----------------------------
-Write-Host "================================================" -ForegroundColor Cyan
-Write-Host "        ⚠  F5 - ASM ENTITIES SCANNER  (CLI MODE)" -ForegroundColor Cyan
-Write-Host "================================================" -ForegroundColor Cyan
-Write-Host "Author: PGV`n" -ForegroundColor Green
 
 # -----------------------------
 # Prompt for password securely
 # -----------------------------
-$Password = Read-Host -AsSecureString "🔐 Enter password for user '$User'"
+$Password = Read-Host -Prompt "Enter password for $User" -AsSecureString
 $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password)
 $PlainPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
 [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
 
 # -----------------------------
-# Config
+# Configure networking
 # -----------------------------
-$CsvOutputFile = "ASM_Entities_Report.csv"
-$BaseUrl = "https://$BigIPHost`:$Port/mgmt/tm"
-$Headers = @{ "Content-Type" = "application/json" }
-$Rows = @()
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+[System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+
+# Prepare basic auth header
+$AuthString = "$User`:$PlainPassword"
+$AuthHeader = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($AuthString))
 
 # -----------------------------
-# Read policies
+# Read input policies from file
 # -----------------------------
-if (-not (Test-Path $PolicyFile)) {
-    Write-Error "❌ Policy file '$PolicyFile' not found."
-    exit 1
-}
-
-$Policies = @()
-Get-Content $PolicyFile | ForEach-Object {
-    $line = $_.Trim()
-    if ($line -and $line -notmatch "^\(-\)") {
-        if ($line -match "^\(\+\)") { $line = $line.Substring(3) }
-        $parts = $line.Split(":", 2)
-        if ($parts.Count -eq 2) {
-            $Policies += [PSCustomObject]@{ PolicyHash = $parts[1]; PolicyName = $parts[0] }
+$Policies = Get-Content -Path $InputFile | ForEach-Object {
+    if ($_ -match "^(.*)\s*:\s*(.*)$") {
+        [PSCustomObject]@{
+            PolicyName = $matches[1].Trim()
+            PolicyHash = $matches[2].Trim()
         }
     }
 }
-
-if ($Policies.Count -eq 0) {
-    Write-Warning "⚠ No enabled policies found."
-    exit 0
-}
-
-Write-Host "`n🚀 Starting scan of $($Policies.Count) enabled policies...`n"
-
-# -----------------------------
-# Helper: query entities
-# -----------------------------
-function Get-Entities {
-    param(
-        [string]$PolicyHash,
-        [string]$EntityType
-    )
-    $Url = "$BaseUrl/asm/policies/$PolicyHash/$EntityType"
-    try {
-        $Response = Invoke-RestMethod -Uri $Url -Method Get -Headers $Headers `
-            -Credential (New-Object System.Management.Automation.PSCredential($User, $Password)) `
-            -SkipCertificateCheck
-        Start-Sleep -Milliseconds 500
-        Write-Host "   ✅ $EntityType retrieved successfully"
-        return $Response.items
-    } catch {
-        Write-Warning ("   ❌ Failed to query {0}: {1}" -f $EntityType, $_.Exception.Message)
-        return @()
-    }
-}
-
 
 # -----------------------------
 # Entity types to query
@@ -103,24 +48,74 @@ function Get-Entities {
 $EntityTypes = @("parameters","urls","cookies","headers","json-profiles")
 
 # -----------------------------
+# Function to get entities per policy and entity type
+# -----------------------------
+function Get-Entities {
+    param (
+        [string]$PolicyHash,
+        [string]$EntityType,
+        [string]$PolicyName
+    )
+
+    $Url = "https://$BigIPHost`:$Port/mgmt/tm/asm/policies/$PolicyHash/$EntityType"
+
+    $request = [System.Net.HttpWebRequest]::Create($Url)
+    $request.Method = "GET"
+    $request.Headers["Authorization"] = "Basic $AuthHeader"
+    $request.Accept = "application/json"
+
+    try {
+        $response = $request.GetResponse()
+        $stream = $response.GetResponseStream()
+        $reader = New-Object System.IO.StreamReader($stream)
+        $json = $reader.ReadToEnd()
+        $reader.Close()
+
+        $data = $json | ConvertFrom-Json
+
+        # Confirmation message
+        Write-Host "$PolicyName - $EntityType - ok"
+
+        # 1-second delay after request
+        Start-Sleep -Seconds 1
+
+        return $data.items
+    } catch {
+        Write-Warning "Failed to retrieve $EntityType for policy $PolicyHash`: $_"
+        # Still wait 1 second to avoid flooding BIG-IP
+        Start-Sleep -Seconds 1
+        return @()
+    }
+}
+
+# -----------------------------
 # Collect data
 # -----------------------------
+$Rows = @()
+
 foreach ($Policy in $Policies) {
     Write-Host "`n⏳ Querying policy: $($Policy.PolicyName) ($($Policy.PolicyHash))"
 
     foreach ($EntityType in $EntityTypes) {
-        $Items = Get-Entities -PolicyHash $Policy.PolicyHash -EntityType $EntityType
+        $Items = Get-Entities -PolicyHash $Policy.PolicyHash -EntityType $EntityType -PolicyName $Policy.PolicyName
+
         foreach ($Item in $Items) {
+
+            # Determine attack signature check
             $CheckSignatures = if ($EntityType -eq "headers") { $Item.checkSignatures } else { $Item.attackSignaturesCheck }
 
+            # Capitalize first letter of EntityType
+            $CleanEntityType = ($EntityType -replace "-", " ")
+            $CleanEntityType = $CleanEntityType.Substring(0,1).ToUpper() + $CleanEntityType.Substring(1)
+
             $Row = [PSCustomObject]@{
-                "SecurityPolicy"        = $Policy.PolicyName
-                "EntityType"            = ($EntityType -replace "-", " ") -replace "\b\w", { $_.Value.ToUpper() }
-                "EntityName"            = $Item.name
-                "AttackSignaturesCheck" = $CheckSignatures
-                "Staged"                = $Item.performStaging
-                "Sensitive"             = if ($Item.sensitiveParameter) { $Item.sensitiveParameter } else { $Item.sensitiveCookie }
-                "SignatureOverrides"    = ($Item.signatureOverrides | ForEach-Object { "$($_.signatureReference.signatureId) - $($_.signatureReference.name)" }) -join "`n"
+                SecurityPolicy        = $Policy.PolicyName
+                EntityType            = $CleanEntityType
+                EntityName            = $Item.name
+                AttackSignaturesCheck = $CheckSignatures
+                Staged                = $Item.performStaging
+                Sensitive             = if ($Item.sensitiveParameter) { $Item.sensitiveParameter } else { $Item.sensitiveCookie }
+                SignatureOverrides    = ($Item.signatureOverrides | ForEach-Object { "$($_.signatureReference.signatureId) - $($_.signatureReference.name)" }) -join "`n"
             }
 
             $Rows += $Row
@@ -129,14 +124,10 @@ foreach ($Policy in $Policies) {
 }
 
 # -----------------------------
-# Export CSV
+# Output table and export
 # -----------------------------
-try {
-    $Rows | Export-Csv -Path $CsvOutputFile -NoTypeInformation -Encoding UTF8
-    Write-Host "`n📁 CSV report saved as $CsvOutputFile" -ForegroundColor Green
-} catch {
-    Write-Error "❌ Failed to export CSV: $_"
-    exit 1
-}
+$Rows | Format-Table -AutoSize
 
-Write-Host "`n✅ Scan complete. Total policies scanned: $($Policies.Count)"
+$ExportFile = Join-Path -Path (Get-Location) -ChildPath "ASM_Entities_Export.csv"
+$Rows | Export-Csv -Path $ExportFile -NoTypeInformation -Encoding UTF8
+Write-Host "`nAll entities exported to $ExportFile"
