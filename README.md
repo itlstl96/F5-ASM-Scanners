@@ -1,88 +1,25 @@
-.\Export-ASM-Policies.ps1 -BigIPHost 192.168.1.220 -Port 8443 -User admin
+The following repo requires admin/api access to BigIP in order to check for misconfigurations. 
 
-.\Scan-ASM-Entities.ps1 -BigIPHost 192.168.1.220 -Port 8443 -User admin -InputFile ASM_Policies_Export.txt
-
-.\Scan-ASM-Signatures.ps1 -BigIPHost 192.168.1.220 -Port 8443 -User admin -InputFile ASM_Policies_Export.txt
-
- .\Scan-ASM-Violations.ps1 -BigIPHost 192.168.1.220 -Port 8443 -User admin -PolicyFile ASM_Policies_Export.txt -ViolationsFile list-mica.txt
+The environment was PowerShell 5 with BigIP 17.1.5
 
 
-1. List ASM policies in format [security policy name] : [security policy id]
+Export-ASM-Policies.ps1 
+--- 
+1. Usage: This script will extract all the ASM policies into a text file that will be used in the future as an input list.
+2. CLI command: `.\Export-ASM-Policies.ps1 -BigIPHost 192.168.1.220 -Port 8443 -User admin`
 
-`pwsh ./Export-ASM-Policies.ps1 -BigIPHost 192.168.1.x -User admin`
+Scan-ASM-Entities.ps1
+---
+1. Usage: This script will output parameters,URLs,headers,cookies,JSON profiles configured and with informations like staging, check attack signatures etc
+2. CLI command: `.\Scan-ASM-Entities.ps1 -BigIPHost 192.168.1.220 -Port 8443 -User admin -InputFile ASM_Policies_Export.txt`
+3. Output in CSV file, and also in CLI:
 
-```
-================================================
-        ⚠  F5 - ASM POLICIES LISTER  (CLI MODE)
-================================================
-Author: PGV
-
-🔐 Enter password for user 'admin': **********
-
-📌 Found 3 security policies
-
-Copie2 : qiy21TOeRI2vyNMdxIgOfg
-Copie1 : gvqBoTcOCf7q4zAuFozUEg
-Default : KRFEmGtMyABlzWyLt3ow8A
-
-✅ Policies saved to ASM_security_policies.txt
-```
-
-
-2. For the ASM policies extracted at 1. this will output in CSV file the following columns. The script has a delay embeded after eache query:
-
-`pwsh ./Scan-ASM-Entities.ps1 -BigIPHost 192.168.1.x -User admin -PolicyFile ASM_security_policies.txt`
-
-```
-================================================
-        ⚠  F5 - ASM ENTITIES SCANNER  (CLI MODE)
-================================================
-Author: PGV
-
-🔐 Enter password for user 'admin': **********
-
-🚀 Starting scan of 3 enabled policies...
-
-
-⏳ Querying policy: Copie2 (qiy21TOeRI2vyNMdxIgOfg)
-   ✅ parameters retrieved successfully
-   ✅ urls retrieved successfully
-   ✅ cookies retrieved successfully
-   ✅ headers retrieved successfully
-   ✅ json-profiles retrieved successfully
-
-⏳ Querying policy: Copie1 (gvqBoTcOCf7q4zAuFozUEg)
-   ✅ parameters retrieved successfully
-   ✅ urls retrieved successfully
-   ✅ cookies retrieved successfully
-   ✅ headers retrieved successfully
-   ✅ json-profiles retrieved successfully
-
-⏳ Querying policy: Default (KRFEmGtMyABlzWyLt3ow8A)
-   ✅ parameters retrieved successfully
-   ✅ urls retrieved successfully
-   ✅ cookies retrieved successfully
-   ✅ headers retrieved successfully
-   ✅ json-profiles retrieved successfully
-
-📁 CSV report saved as ASM_Entities_Report.csv
-
-✅ Scan complete. Total policies scanned: 3
-```
-
-With this output you can find if you have parameters in staging or without check attack signatures active. The following entities will be scanned: parameters, URLs, Cookies, Headers, JSON profiles
-
+   
 | Security Policy | Entity Type   | Entity Name      | Attack Signatures Check | Staged | Sensitive | Signature Overrides |
 |-----------------|---------------|------------------|--------------------------|--------|-----------|----------------------|
 | Copie2          | Parameters    | *                | True                     | True   | False     |                      |
 | Copie2          | Urls          | /vvvvv           | True                     | True   |           | 200010211 - "%CommonProgramW6432%" access (Header) 200100093 - "%ALLUSERSPROFILE%" access (URI) |
 | Copie2          | Urls          | *                | True                     | True   |           |                      |
-| Copie2          | Urls          | *                | False                    | True   |           |                      |
-| Copie2          | Cookies       | *                | True                     | True   |           |                      |
-| Copie2          | Headers       | transfer-encoding| False                    | False  |           |                      |
-| Copie2          | Headers       | authorization    | False                    | False  |           |                      |
-| Copie2          | Headers       | cookie           | False                    | False  |           |                      |
-| Copie2          | Headers       | *                | False                    | False  |           |                      |
 | Copie2          | Headers       | referer          | False                    | False  |           |                      |
 | Copie2          | Json Profiles | Default          | False                    | False  |           |                      |
 | Copie1          | Parameters    | test             | False                    | False  | False     |                      |
@@ -96,74 +33,36 @@ With this output you can find if you have parameters in staging or without check
 
 
 
-3. Search all policies for specific violations.
+Scan-ASM-Signatures.ps1
+---
+1. Usage: This will scan the ASM signatures and will output a statistic with enabled signatures, staged, blocking etc 
+2. CLI command: `.\Scan-ASM-Signatures.ps1 -BigIPHost 192.168.1.220 -Port 8443 -User admin -InputFile ASM_Policies_Export.txt`
+3. Output: This has only CLI output
 
-`pwsh ./Scan-ASM-Violations.ps1 -BigIPHost 192.168.1.x -User admin -Port 8443 -PolicyFile ASM_security_policies.txt -ViolationsFile Violations-list.txt`
-```
-==================================================
-        F5 - ASM - Violations Scanner (CLI MODE)
-==================================================
-Author: PGV
-
-🔐 Enter password for user 'admin': **********
-
-⏳ Scanning policy: Copie2 (qiy21TOeRI2vyNMdxIgOfg)
-✅ Request OK → qiy21TOeRI2vyNMdxIgOfg
-
-⏳ Scanning policy: Copie1 (gvqBoTcOCf7q4zAuFozUEg)
-✅ Request OK → gvqBoTcOCf7q4zAuFozUEg
-
-⏳ Scanning policy: Default (KRFEmGtMyABlzWyLt3ow8A)
-✅ Request OK → KRFEmGtMyABlzWyLt3ow8A
-
-📁 CSV results exported to ASM_violation_scan_results.csv
-
-📊 Scan Results:
-
-Policy  | Violation Description                    | Block | Alarm | Learn
---------+------------------------------------------+-------+-------+------
-Copie2  | Modified ASM cookie                      | true  | true  | true 
-Copie2  | Illegal meta character in parameter name | false | true  | false
-Copie2  | Illegal host name                        | false | false | false
-Copie1  | Modified ASM cookie                      | false | false | true 
-Copie1  | Illegal meta character in parameter name | false | false | false
-Copie1  | Illegal host name                        | true  | true  | false
-Default | Illegal host name                        | false | false | false
-Default | Modified ASM cookie                      | true  | true  | true 
-Default | Illegal meta character in parameter name | false | false | false
-
-🔎 Scan complete!
-🌐 Total HTTPS requests made to BIG-IP: 3
-```
+| Policy Name | ALARM | BLOCK | STAGING | ENABLED | TOTAL |
+|------------|-------|-------|---------|---------|-------|
+| Copie2     | 9185  | 9185  | 9183    | 9185    | 9185  |
+| Copie1     | 9185  | 9185  | 12      | 9185    | 9185  |
+| Default    | 298   | 298   | 4       | 298     | 298   |
 
 
+Scan-ASM-Violations.ps1
+---
+1. Usage: This will check for specific violation status on all the policies. Eg: Find if "Illegal host name" is in blocking mode on every policy or not.
+2. CLI command: `.\Scan-ASM-Violations.ps1 -BigIPHost 192.168.1.220 -Port 8443 -User admin -PolicyFile ASM_Policies_Export.txt -ViolationsFile list.txt`
+3. Output:
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+| Policy  | Violation Description                       | Block | Alarm | Learn |
+|---------|--------------------------------------------|-------|-------|-------|
+| Copie2  | Modified ASM cookie                         | True  | True  | True  |
+| Copie2  | Illegal meta character in parameter name   | False | True  | False |
+| Copie2  | Illegal host name                           | False | False | False |
+| Copie1  | Modified ASM cookie                         | False | False | True  |
+| Copie1  | Illegal meta character in parameter name   | False | False | False |
+| Copie1  | Illegal host name                           | True  | True  | False |
+| Default | Illegal host name                           | False | False | False |
+| Default | Modified ASM cookie                         | True  | True  | True  |
+| Default | Illegal meta character in parameter name   | False | False | False |
 
 
 
