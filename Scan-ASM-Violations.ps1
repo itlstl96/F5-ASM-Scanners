@@ -1,105 +1,122 @@
-#!/usr/bin/env pwsh
+param (
+    [Parameter(Mandatory=$true)]
+    [string]$BigIPHost,
 
-param(
-    [Parameter(Mandatory=$true)][string]$BigIPHost,
-    [Parameter(Mandatory=$true)][string]$User,
-    [int]$Port = 8443,
-    [Parameter(Mandatory=$true)][string]$PolicyFile,
-    [Parameter(Mandatory=$true)][string]$ViolationsFile
+    [Parameter(Mandatory=$true)]
+    [int]$Port,
+
+    [Parameter(Mandatory=$true)]
+    [string]$User,
+
+    [Parameter(Mandatory=$true)]
+    [string]$PolicyFile,
+
+    [Parameter(Mandatory=$true)]
+    [string]$ViolationsFile
 )
 
 # -----------------------------
-# Banner
+# Secure password
 # -----------------------------
-Write-Host "==================================================" -ForegroundColor Cyan
-Write-Host "        F5 - ASM - Violations Scanner (CLI MODE)" -ForegroundColor White
-Write-Host "==================================================" -ForegroundColor Cyan
-Write-Host "Author: PGV`n"
+$Password = Read-Host -Prompt "Enter password for $User" -AsSecureString
+$BSTR = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password)
+$Plain = [Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
+[Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
 
 # -----------------------------
-# Password prompt (hidden)
+# Networking / SSL
 # -----------------------------
-$SecurePassword = Read-Host -AsSecureString "🔐 Enter password for user '$User'"
-$Credential = New-Object System.Management.Automation.PSCredential($User, $SecurePassword)
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+[System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
 
-$HttpsRequestCount = 0
-$Headers = @{ "Content-Type" = "application/json" }
+$AuthHeader = "Basic " + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$User`:$Plain"))
 
 # -----------------------------
-# Load policies file
+# Load policies
 # -----------------------------
-if (!(Test-Path $PolicyFile)) {
-    Write-Error "❌ Policy file not found: $PolicyFile"
-    exit 1
-}
-
-$Policies = @()
-Get-Content $PolicyFile | ForEach-Object {
+$Policies = Get-Content $PolicyFile | ForEach-Object {
     $line = $_.Trim()
-    if (!$line -or !$line.Contains(":")) { return }
-    $parts = $line.Split(":",2)
-    $Policies += ,@($parts[0].Trim(), $parts[1].Trim())
+    if (-not $line -or $line.StartsWith("-")) { return }
+
+    if ($line.StartsWith("+")) { $line = $line.Substring(1) }
+
+    if ($line -match "^(.*?):(.*)$") {
+        [PSCustomObject]@{
+            Name = $matches[1].Trim()
+            ID   = $matches[2].Trim()
+        }
+    }
 }
 
 # -----------------------------
 # Load violation descriptions
 # -----------------------------
-if (!(Test-Path $ViolationsFile)) {
-    Write-Error "❌ Violation list file not found: $ViolationsFile"
-    exit 1
-}
-
-$ViolationList = @()
-Get-Content $ViolationsFile | ForEach-Object {
-    $v = $_.Trim()
-    if ($v) { $ViolationList += $v }
-}
+$ViolationFilters = Get-Content $ViolationsFile | Where-Object { $_.Trim() -ne "" }
 
 # -----------------------------
-# Query violations from BIG-IP
+# Function: Get ASM Violations
 # -----------------------------
-function Get-Violations {
-    param([string]$PolicyHash)
+function Get-PolicyViolations {
+    param([string]$PolicyID)
 
-    $Url = "https://${BigIPHost}:${Port}/mgmt/tm/asm/policies/${PolicyHash}/blocking-settings/violations/"
+    $url = "https://$BigIPHost`:$Port/mgmt/tm/asm/policies/$PolicyID/blocking-settings/violations/"
+    $req = [Net.HttpWebRequest]::Create($url)
+    $req.Method = "GET"
+    $req.Headers["Authorization"] = $AuthHeader
+    $req.Accept = "application/json"
+
     try {
-        $Resp = Invoke-RestMethod -Uri $Url -Method Get -Headers $Headers -Credential $Credential -SkipCertificateCheck -TimeoutSec 15
-        $script:HttpsRequestCount++
-        Write-Host "✅ Request OK → $PolicyHash"
-        return $Resp.items
-    } catch {
-        Write-Warning "❌ Error fetching violations for policy ${PolicyHash}: $($_.Exception.Message)"
+        $resp = $req.GetResponse()
+        $reader = New-Object IO.StreamReader($resp.GetResponseStream())
+        $json = $reader.ReadToEnd()
+        $reader.Close()
+
+        Start-Sleep -Seconds 1   ### ADDED: 1s delay after every BIG-IP query
+
+        return (ConvertFrom-Json $json).items
+    }
+    catch {
+        Write-Warning "❌ Failed to fetch violations for policy $PolicyID"
         return @()
-    } finally {
-        Start-Sleep 1  # ⏱ 1 second delay between each request
     }
 }
 
 # -----------------------------
-# Collect results
+# Live header before loop  ### ADDED
 # -----------------------------
-$Rows = @()
+Write-Host ""
+Write-Host ("{0,-25} | {1,-50} | {2,5} | {3,5} | {4,5}" -f `
+    "Policy","Violation Description","Block","Alarm","Learn")
+Write-Host ("-" * 105)
 
-foreach ($p in $Policies) {
-    $PolicyName = $p[0]
-    $PolicyHash = $p[1]
+# -----------------------------
+# Scan and LIVE output
+# -----------------------------
+$Results = @()
 
-    Write-Host "`n⏳ Scanning policy: $PolicyName ($PolicyHash)"
+foreach ($policy in $Policies) {
+    $violations = Get-PolicyViolations -PolicyID $policy.ID
 
-    $Violations = Get-Violations -PolicyHash $PolicyHash
+    foreach ($v in $violations) {
+        $desc = $v.description.Trim()
 
-    foreach ($v in $Violations) {
-        $Desc = $v.description.Trim()
+        foreach ($vf in $ViolationFilters) {
+            if ($desc.ToLower().Contains($vf.ToLower())) {
 
-        foreach ($item in $ViolationList) {
-            if ($Desc.ToLower().Contains($item.ToLower())) {
-                $Rows += ,@(
-                    $PolicyName,
-                    $Desc,
-                    ($v.block ? "true" : "false"),
-                    ($v.alarm ? "true" : "false"),
-                    ($v.learn ? "true" : "false")
-                )
+                $row = [PSCustomObject]@{
+                    Policy      = $policy.Name
+                    Description = $desc
+                    Block       = $v.block
+                    Alarm       = $v.alarm
+                    Learn       = $v.learn
+                }
+
+                $Results += $row
+
+                # ------- LIVE PRINT --------  ### ADDED
+                Write-Host ("{0,-25} | {1,-50} | {2,5} | {3,5} | {4,5}" -f `
+                    $row.Policy, $row.Description, $row.Block, $row.Alarm, $row.Learn)
+
                 break
             }
         }
@@ -107,69 +124,7 @@ foreach ($p in $Policies) {
 }
 
 # -----------------------------
-# Export results to CSV (overwrite each run)
+# Final summary
 # -----------------------------
-$CsvFile = "ASM_violation_scan_results.csv"
-
-$OutRows = @()
-$OutRows += "Policy,Violation Description,Block,Alarm,Learn"
-
-foreach ($row in $Rows) {
-    $OutRows += "$($row[0]),`"$($row[1])`",$($row[2]),$($row[3]),$($row[4])"
-}
-
-$OutRows | Out-File -FilePath $CsvFile -Encoding utf8 -Force
-
-Write-Host "`n📁 CSV results exported to $CsvFile" -ForegroundColor Green
-
-# -----------------------------
-# Print aligned table to CLI
-# -----------------------------
-if (!$Rows) {
-    Write-Host "`n⚠ No matching violations found."
-} else {
-
-    $HeadersRow = @("Policy", "Violation Description", "Block", "Alarm", "Learn")
-
-    $ColWidths = @(0,0,0,0,0)
-    for ($i = 0; $i -lt 5; $i++) {
-        $max = ($Rows | ForEach-Object { 
-            if ($null -ne $_[$i]) { $_[$i].Length } else { 0 }
-        } | Measure-Object -Maximum).Maximum
-        $ColWidths[$i] = [Math]::Max($max, $HeadersRow[$i].Length)
-    }
-
-    $HeaderLine = ""
-    for ($i = 0; $i -lt 5; $i++) {
-        $HeaderLine += $HeadersRow[$i].PadRight($ColWidths[$i])
-        if ($i -lt 4) { $HeaderLine += " | " }
-    }
-
-    Write-Host "`n📊 Scan Results:`n"
-    Write-Host $HeaderLine
-
-    Write-Host (("-" * $ColWidths[0]) + "-+-" +
-               ("-" * $ColWidths[1]) + "-+-" +
-               ("-" * $ColWidths[2]) + "-+-" +
-               ("-" * $ColWidths[3]) + "-+-" +
-               ("-" * $ColWidths[4]))
-
-    $Rows | ForEach-Object {
-        $line = ""
-        for ($i = 0; $i -lt 5; $i++) {
-            if ($null -ne $_[$i]) {
-                $line += $_[$i].PadRight($ColWidths[$i])
-            } else {
-                $line += "".PadRight($ColWidths[$i])
-            }
-            if ($i -lt 4) { $line += " | " }
-        }
-        Write-Host $line
-    }
-}
-
-# -----------------------------
-# HTTPS stats
-# -----------------------------
-Write-Host "`n🔎 Scan complete!" -ForegroundColor Green
-Write-Host "🌐 Total HTTPS requests made to BIG-IP: $($script:HttpsRequestCount)" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "Scan complete. Total results: $($Results.Count)"
