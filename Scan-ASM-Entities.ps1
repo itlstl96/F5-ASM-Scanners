@@ -73,16 +73,12 @@ function Get-Entities {
 
         $data = $json | ConvertFrom-Json
 
-        # Confirmation message
         Write-Host "$PolicyName - $EntityType - ok"
-
-        # 1-second delay after request
         Start-Sleep -Seconds 1
 
         return $data.items
     } catch {
         Write-Warning "Failed to retrieve $EntityType for policy $PolicyHash`: $_"
-        # Still wait 1 second to avoid flooding BIG-IP
         Start-Sleep -Seconds 1
         return @()
     }
@@ -97,7 +93,15 @@ foreach ($Policy in $Policies) {
     Write-Host "`n⏳ Querying policy: $($Policy.PolicyName) ($($Policy.PolicyHash))"
 
     foreach ($EntityType in $EntityTypes) {
+
         $Items = Get-Entities -PolicyHash $Policy.PolicyHash -EntityType $EntityType -PolicyName $Policy.PolicyName
+
+        # -----------------------------
+        # FILTER OUT disallowed URLs
+        # -----------------------------
+        if ($EntityType -eq "urls") {
+            $Items = $Items | Where-Object { $_.isAllowed -eq $true }
+        }
 
         foreach ($Item in $Items) {
 
@@ -108,6 +112,7 @@ foreach ($Policy in $Policies) {
             $CleanEntityType = ($EntityType -replace "-", " ")
             $CleanEntityType = $CleanEntityType.Substring(0,1).ToUpper() + $CleanEntityType.Substring(1)
 
+            # Build output row
             $Row = [PSCustomObject]@{
                 SecurityPolicy        = $Policy.PolicyName
                 EntityType            = $CleanEntityType
@@ -124,10 +129,15 @@ foreach ($Policy in $Policies) {
 }
 
 # -----------------------------
-# Output table and export
+# Build dynamic export filename
 # -----------------------------
-$Rows | Format-Table -AutoSize
+$DateStamp = (Get-Date).ToString("MMddyyyy")
+$TimeStamp = (Get-Date).ToString("HHmm")
+$InputListName = [System.IO.Path]::GetFileNameWithoutExtension($InputFile)
 
-$ExportFile = Join-Path -Path (Get-Location) -ChildPath "ASM_Entities_Export.csv"
+$ExportFileName = "$DateStamp-$InputListName-$TimeStamp.csv"
+$ExportFile = Join-Path -Path (Get-Location) -ChildPath $ExportFileName
+
+# Export CSV
 $Rows | Export-Csv -Path $ExportFile -NoTypeInformation -Encoding UTF8
 Write-Host "`nAll entities exported to $ExportFile"
