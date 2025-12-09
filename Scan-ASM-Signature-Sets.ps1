@@ -86,6 +86,7 @@ foreach ($policy in $PolicyList) {
             }
         }
     }
+    Start-Sleep -Seconds 1  # 1-second delay between policies
 }
 
 $SigColumns = $AllSignatureSets.Keys | Sort-Object
@@ -113,7 +114,13 @@ foreach ($policy in $PolicyList) {
         }
         $row[$sigName] = $exists
     }
+
     $CsvData += New-Object PSObject -Property $row
+
+    # Live CLI confirmation
+    Write-Host "$($policy.PolicyName) - OK"
+
+    Start-Sleep -Seconds 1  # 1-second delay after each policy
 }
 
 # Export to CSV
