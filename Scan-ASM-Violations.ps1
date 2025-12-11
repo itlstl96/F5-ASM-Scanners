@@ -71,7 +71,7 @@ function Get-PolicyViolations {
         $json = $reader.ReadToEnd()
         $reader.Close()
 
-        Start-Sleep -Seconds 1   ### ADDED: 1s delay after every BIG-IP query
+        Start-Sleep -Seconds 1   ### 1s delay after every BIG-IP query
 
         return (ConvertFrom-Json $json).items
     }
@@ -82,15 +82,7 @@ function Get-PolicyViolations {
 }
 
 # -----------------------------
-# Live header before loop  ### ADDED
-# -----------------------------
-Write-Host ""
-Write-Host ("{0,-25} | {1,-50} | {2,5} | {3,5} | {4,5}" -f `
-    "Policy","Violation Description","Block","Alarm","Learn")
-Write-Host ("-" * 105)
-
-# -----------------------------
-# Scan and LIVE output
+# Scan policies
 # -----------------------------
 $Results = @()
 
@@ -107,24 +99,58 @@ foreach ($policy in $Policies) {
                     Policy      = $policy.Name
                     Description = $desc
                     Block       = $v.block
-                    Alarm       = $v.alarm
-                    Learn       = $v.learn
                 }
 
                 $Results += $row
-
-                # ------- LIVE PRINT --------  ### ADDED
-                Write-Host ("{0,-25} | {1,-50} | {2,5} | {3,5} | {4,5}" -f `
-                    $row.Policy, $row.Description, $row.Block, $row.Alarm, $row.Learn)
-
                 break
             }
         }
     }
+
+    # Minimal CLI output for progress
+    Write-Host "$($policy.Name) - OK"
 }
 
 # -----------------------------
-# Final summary
+# Build CSV matrix (only Block)
 # -----------------------------
+$CSVRows = @()
+
+foreach ($policy in $Policies) {
+
+    $row = [ordered]@{
+        PolicyName = $policy.Name
+        PolicyID   = $policy.ID
+    }
+
+    # Initialize all violation columns to False
+    foreach ($vf in $ViolationFilters) {
+        $row[$vf] = $false
+    }
+
+    # Fill in True if Block is enabled
+    $matches = $Results | Where-Object { $_.Policy -eq $policy.Name }
+
+    foreach ($m in $matches) {
+        foreach ($vf in $ViolationFilters) {
+            if ($m.Description.ToLower().Contains($vf.ToLower())) {
+                $row[$vf] = [bool]$m.Block
+            }
+        }
+    }
+
+    $CSVRows += New-Object PSObject -Property $row
+}
+
+# -----------------------------
+# Generate CSV filename: YYYYMMDD-<PolicyFileName>-HHMM.csv
+# -----------------------------
+$timestamp = Get-Date -Format "yyyyMMdd-HHmm"
+$policyBase = [System.IO.Path]::GetFileNameWithoutExtension($PolicyFile)
+$csvFileName = "$timestamp-$policyBase.csv"
+
+# Export CSV
+$CSVRows | Export-Csv -Path $csvFileName -NoTypeInformation
+
 Write-Host ""
-Write-Host "Scan complete. Total results: $($Results.Count)"
+Write-Host "CSV output written to: $csvFileName"
