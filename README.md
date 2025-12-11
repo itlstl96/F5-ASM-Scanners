@@ -52,6 +52,23 @@ Scan-ASM-Violations.ps1
 2. CLI command: `.\Scan-ASM-Violations.ps1 -BigIPHost 192.168.1.220 -Port 8443 -User admin -PolicyFile ASM_Policies_Export.txt -ViolationsFile list.txt`
 3. Output:
 
+Cookie not RFC-compliant
+Illegal cookie length
+Modified ASM cookie
+Illegal file type
+Failed to convert character
+Illegal HTTP status in response
+Request length exceeds defined buffer size
+Illegal header length
+Illegal host name
+Illegal method
+Illegal repeated header
+Illegal meta character in parameter name
+Illegal redirection attempt
+Access from disallowed User/Session/IP/Device ID
+Illegal URL
+
+
 | Policy  | Violation Description                       | Block | Alarm | Learn |
 |---------|--------------------------------------------|-------|-------|-------|
 | Copie2  | Modified ASM cookie                         | True  | True  | True  |
