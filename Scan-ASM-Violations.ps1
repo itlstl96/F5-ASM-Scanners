@@ -49,9 +49,11 @@ $Policies = Get-Content $PolicyFile | ForEach-Object {
 }
 
 # -----------------------------
-# Load violation descriptions
+# Load violation descriptions (EXACT MATCH LIST)
 # -----------------------------
-$ViolationFilters = Get-Content $ViolationsFile | Where-Object { $_.Trim() -ne "" }
+$ViolationFilters = Get-Content $ViolationsFile |
+    Where-Object { $_.Trim() -ne "" } |
+    ForEach-Object { $_.Trim() }
 
 # -----------------------------
 # Function: Get ASM Violations
@@ -93,7 +95,8 @@ foreach ($policy in $Policies) {
         $desc = $v.description.Trim()
 
         foreach ($vf in $ViolationFilters) {
-            if ($desc.ToLower().Contains($vf.ToLower())) {
+            # EXACT match, case-insensitive
+            if ($desc.ToLower() -eq $vf.ToLower()) {
 
                 $row = [PSCustomObject]@{
                     Policy      = $policy.Name
@@ -107,7 +110,6 @@ foreach ($policy in $Policies) {
         }
     }
 
-    # Minimal CLI output for progress
     Write-Host "$($policy.Name) - OK"
 }
 
@@ -128,12 +130,12 @@ foreach ($policy in $Policies) {
         $row[$vf] = $false
     }
 
-    # Fill in True if Block is enabled
+    # Fill in True if Block is enabled (EXACT MATCH)
     $matches = $Results | Where-Object { $_.Policy -eq $policy.Name }
 
     foreach ($m in $matches) {
         foreach ($vf in $ViolationFilters) {
-            if ($m.Description.ToLower().Contains($vf.ToLower())) {
+            if ($m.Description.Trim().ToLower() -eq $vf.Trim().ToLower()) {
                 $row[$vf] = [bool]$m.Block
             }
         }
@@ -143,7 +145,7 @@ foreach ($policy in $Policies) {
 }
 
 # -----------------------------
-# Generate CSV filename: YYYYMMDD-<PolicyFileName>-HHMM.csv
+# Generate CSV filename
 # -----------------------------
 $timestamp = Get-Date -Format "yyyyMMdd-HHmm"
 $policyBase = [System.IO.Path]::GetFileNameWithoutExtension($PolicyFile)
