@@ -98,6 +98,9 @@ $csvData = foreach ($vs in $data.items) {
     # iRules
     $iRules = if ($vs.rules) { $vs.rules -join "; " } else { "" }
 
+    # Logging profiles
+    $loggingProfiles = if ($vs.securityLogProfiles) { ($vs.securityLogProfiles -join "; ") } else { "" }
+
     # Destination parsing
     $destinationIP = ""
     $destinationPort = ""
@@ -135,15 +138,16 @@ $csvData = foreach ($vs in $data.items) {
         name                 = $vs.name
         destinationIP        = $destinationIP
         destinationPort      = $destinationPort
-        iRules               = $iRules
-        httpAnalyticsProfile = $httpAnalyticsProfile
-        httpProfile          = $httpProfile
-        tcpProfile           = $tcpProfile
-        tcpAnalyticsProfile  = $tcpAnalyticsProfile
-        websocketProfile     = $websocketProfile
         connectionLimit      = $vs.connectionLimit
         rateLimit            = $vs.rateLimit
         flowEvictionPolicy   = $vs.flowEvictionPolicy
+        loggingProfiles      = $loggingProfiles
+        iRules               = $iRules
+        httpProfile          = $httpProfile
+        httpAnalyticsProfile = $httpAnalyticsProfile
+        tcpProfile           = $tcpProfile
+        tcpAnalyticsProfile  = $tcpAnalyticsProfile
+        websocketProfile     = $websocketProfile
     }
 }
 
