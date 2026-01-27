@@ -1,18 +1,18 @@
 param (
-    [Parameter(Mandatory=$true)]
+    [Parameter(Mandatory = $true)]
     [string]$BigIPHost,
 
-    [Parameter(Mandatory=$true)]
+    [Parameter(Mandatory = $true)]
     [int]$Port,
 
-    [Parameter(Mandatory=$true)]
+    [Parameter(Mandatory = $true)]
     [string]$User
 )
 
 # Prompt for password securely
 $Password = Read-Host -Prompt "Enter password for $User" -AsSecureString
 
-# Convert secure password → plain text
+# Convert secure password to plain text
 $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password)
 $PlainPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
 [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
@@ -23,62 +23,144 @@ $PlainPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR
 # Disable SSL certificate validation
 [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
 
-# Virtual Server endpoint
+# Base Virtual Server endpoint
 $Url = "https://$BigIPHost`:$Port/mgmt/tm/ltm/virtual"
 
-# Prepare HTTP request
+# Authorization header
 $AuthString = "$User`:$PlainPassword"
 $AuthHeader = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($AuthString))
 
-$request = [System.Net.HttpWebRequest]::Create($Url)
-$request.Method = "GET"
-$request.Headers["Authorization"] = "Basic $AuthHeader"
-$request.Accept = "application/json"
+$Headers = @{
+    "Authorization" = "Basic $AuthHeader"
+}
 
-# Send request
-try {
-    $response = $request.GetResponse()
-} catch {
-    Write-Host "ERROR: Cannot connect to BIG-IP at $BigIPHost on port $Port"
-    Write-Host $_.Exception.Message
+# -------------------------
+# Helper functions
+# -------------------------
+
+function Invoke-BigIPGet {
+    param (
+        [string]$Url,
+        [hashtable]$Headers
+    )
+
+    try {
+        $request = [System.Net.HttpWebRequest]::Create($Url)
+        $request.Method = "GET"
+        foreach ($key in $Headers.Keys) {
+            $request.Headers[$key] = $Headers[$key]
+        }
+        $request.Accept = "application/json"
+
+        $response = $request.GetResponse()
+        $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+        $json = $reader.ReadToEnd()
+        $reader.Close()
+
+        return $json | ConvertFrom-Json
+    }
+    catch {
+        return $null
+    }
+}
+
+function Get-ProfileFullPath {
+    param (
+        $ProfilesData,
+        [string]$ProfileName
+    )
+
+    $profile = $ProfilesData.items | Where-Object { $_.name -eq $ProfileName }
+    if ($profile) {
+        return $profile.fullPath
+    }
+    return ""
+}
+
+# -------------------------
+# Get Virtual Servers
+# -------------------------
+
+$data = Invoke-BigIPGet -Url $Url -Headers $Headers
+
+if (-not $data -or -not $data.items) {
+    Write-Host "No virtual servers found or unable to connect."
     exit 1
 }
 
-# Read response
-$reader = New-Object System.IO.StreamReader($response.GetResponseStream())
-$json = $reader.ReadToEnd()
-$reader.Close()
+# -------------------------
+# Process Virtual Servers
+# -------------------------
 
-$data = $json | ConvertFrom-Json
+$csvData = foreach ($vs in $data.items) {
 
-# Output CSV path
-$OutputFile = Join-Path (Get-Location) "Virtual_Servers_Export.csv"
+    # iRules
+    $iRules = if ($vs.rules) {
+        $vs.rules -join "; "
+    } else {
+        ""
+    }
 
-if ($data.items) {
+    # Destination parsing
+    $destinationIP   = ""
+    $destinationPort = ""
 
-    $csvData = foreach ($vs in $data.items) {
-
-        $securityProfiles = if ($vs.securityLogProfiles) {
-            ($vs.securityLogProfiles -replace '^"|"$') -join "; "
-        } else {
-            ""
-        }
-
-        [PSCustomObject]@{
-            name               = $vs.name
-            creationTime       = $vs.creationTime
-            lastModifiedTime   = $vs.lastModifiedTime
-            destination        = $vs.destination
-            securityLogProfiles= $securityProfiles
-            connectionLimit    = $vs.connectionLimit
-            rateLimit          = $vs.rateLimit
-            flowEvictionPolicy = $vs.flowEvictionPolicy
+    if ($vs.destination) {
+        $dest = $vs.destination -replace '^/[^/]+/', ''
+        if ($dest -match '^(.*):(\d+)$') {
+            $destinationIP   = $matches[1]
+            $destinationPort = $matches[2]
         }
     }
 
-    $csvData | Export-Csv -Path $OutputFile -NoTypeInformation -Encoding UTF8
-    Write-Host "Virtual servers exported to $OutputFile"
+    # Initialize profile values
+    $httpProfile          = ""
+    $tcpProfile           = ""
+    $tcpAnalyticsProfile  = ""
+    $httpAnalyticsProfile = ""
+    $websocketProfile     = ""
+
+    # Profiles lookup
+    if ($vs.profilesReference -and $vs.profilesReference.link) {
+
+        $profilesUrl = $vs.profilesReference.link `
+            -replace "https://localhost", "https://$BigIPHost`:$Port"
+
+        $profilesData = Invoke-BigIPGet -Url $profilesUrl -Headers $Headers
+
+        if ($profilesData -and $profilesData.items) {
+            $httpProfile          = Get-ProfileFullPath $profilesData "http"
+            $tcpProfile           = Get-ProfileFullPath $profilesData "tcp"
+            $tcpAnalyticsProfile  = Get-ProfileFullPath $profilesData "tcp-analytics"
+            $httpAnalyticsProfile = Get-ProfileFullPath $profilesData "analytics"
+            $websocketProfile     = Get-ProfileFullPath $profilesData "websocket"
+        }
+    }
+
+    [PSCustomObject]@{
+        name                 = $vs.name
+        creationTime         = $vs.creationTime
+        lastModifiedTime     = $vs.lastModifiedTime
+        destinationIP        = $destinationIP
+        destinationPort      = $destinationPort
+        iRules               = $iRules
+        httpProfile          = $httpProfile
+        tcpProfile           = $tcpProfile
+        tcpAnalyticsProfile  = $tcpAnalyticsProfile
+        httpAnalyticsProfile = $httpAnalyticsProfile
+        websocketProfile     = $websocketProfile
+        connectionLimit      = $vs.connectionLimit
+        rateLimit            = $vs.rateLimit
+        flowEvictionPolicy   = $vs.flowEvictionPolicy
+    }
 }
-else {
-    Write-Host "No virtual servers found."
-}
+
+# -------------------------
+# Export CSV
+# -------------------------
+
+$OutputFile = Join-Path (Get-Location) "Virtual_Servers_Export.csv"
+
+$csvData | Export-Csv -Path $OutputFile -NoTypeInformation -Encoding UTF8
+
+Write-Host "Virtual servers exported to $OutputFile"
