@@ -9,70 +9,72 @@ param (
     [string]$User
 )
 
-# Prompt for password securely
-$Password = Read-Host -Prompt "Enter password for $User" -AsSecureString
+# -------------------------
+# Authentication
+# -------------------------
 
-# Convert secure password to plain text
+$Password = Read-Host -Prompt "Enter password for $User" -AsSecureString
 $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password)
 $PlainPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
 [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
 
-# Force TLS 1.2
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+[Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
 
-# Disable SSL certificate validation
-[System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+$BaseUrl = "https://$BigIPHost`:$Port"
+$VSUrl   = "$BaseUrl/mgmt/tm/ltm/virtual"
 
-# Base Virtual Server endpoint
-$Url = "https://$BigIPHost`:$Port/mgmt/tm/ltm/virtual"
+$AuthHeader = [Convert]::ToBase64String(
+    [Text.Encoding]::ASCII.GetBytes("$User`:$PlainPassword")
+)
 
-# Authorization header
-$AuthString = "$User`:$PlainPassword"
-$AuthHeader = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($AuthString))
+$Headers = @{ Authorization = "Basic $AuthHeader" }
 
-$Headers = @{
-    "Authorization" = "Basic $AuthHeader"
-}
+# -------------------------
+# Profile lists
+# -------------------------
+
+$HttpProfiles = @("custom-http","http","http-explicit","http-transparent")
+$TcpProfiles = @(
+    "apm-forwarding-client-tcp","apm-forwarding-server-tcp","f5-tcp-lan",
+    "f5-tcp-mobile","f5-tcp-progressive","f5-tcp-wan","mptcp-mobile-optimized",
+    "splitsession-default-tcp","tcp","tcp-lan-optimized"
+)
+$WebsocketProfiles = @("websocket")
+$HttpAnalyticsProfiles = @("analytics")
+$TcpAnalyticsProfiles = @("tcp-analytics")
 
 # -------------------------
 # Helper functions
 # -------------------------
 
 function Invoke-BigIPGet {
-    param (
-        [string]$Url,
-        [hashtable]$Headers
-    )
+    param ($Url)
 
     try {
-        $request = [System.Net.HttpWebRequest]::Create($Url)
-        $request.Method = "GET"
-        foreach ($key in $Headers.Keys) {
-            $request.Headers[$key] = $Headers[$key]
-        }
-        $request.Accept = "application/json"
+        $req = [System.Net.HttpWebRequest]::Create($Url)
+        $req.Method = "GET"
+        $req.Headers["Authorization"] = $Headers.Authorization
+        $req.Accept = "application/json"
 
-        $response = $request.GetResponse()
-        $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
-        $json = $reader.ReadToEnd()
-        $reader.Close()
-
-        return $json | ConvertFrom-Json
+        $resp = $req.GetResponse()
+        $reader = New-Object IO.StreamReader($resp.GetResponseStream())
+        $reader.ReadToEnd() | ConvertFrom-Json
     }
     catch {
-        return $null
+        $null
     }
 }
 
-function Get-ProfileFullPath {
+function Get-ProfileByList {
     param (
         $ProfilesData,
-        [string]$ProfileName
+        [string[]]$PossibleNames
     )
 
-    $profile = $ProfilesData.items | Where-Object { $_.name -eq $ProfileName }
-    if ($profile) {
-        return $profile.fullPath
+    foreach ($name in $PossibleNames) {
+        $match = $ProfilesData.items | Where-Object { $_.name -eq $name } | Select-Object -First 1
+        if ($match) { return $match.fullPath }
     }
     return ""
 }
@@ -81,10 +83,9 @@ function Get-ProfileFullPath {
 # Get Virtual Servers
 # -------------------------
 
-$data = Invoke-BigIPGet -Url $Url -Headers $Headers
-
-if (-not $data -or -not $data.items) {
-    Write-Host "No virtual servers found or unable to connect."
+$data = Invoke-BigIPGet $VSUrl
+if (-not $data.items) {
+    Write-Host "No virtual servers found."
     exit 1
 }
 
@@ -95,14 +96,10 @@ if (-not $data -or -not $data.items) {
 $csvData = foreach ($vs in $data.items) {
 
     # iRules
-    $iRules = if ($vs.rules) {
-        $vs.rules -join "; "
-    } else {
-        ""
-    }
+    $iRules = if ($vs.rules) { $vs.rules -join "; " } else { "" }
 
     # Destination parsing
-    $destinationIP   = ""
+    $destinationIP = ""
     $destinationPort = ""
 
     if ($vs.destination) {
@@ -113,41 +110,36 @@ $csvData = foreach ($vs in $data.items) {
         }
     }
 
-    # Initialize profile values
+    # Profiles
     $httpProfile          = ""
     $tcpProfile           = ""
     $tcpAnalyticsProfile  = ""
     $httpAnalyticsProfile = ""
     $websocketProfile     = ""
 
-    # Profiles lookup
-    if ($vs.profilesReference -and $vs.profilesReference.link) {
+    if ($vs.profilesReference.link) {
 
-        $profilesUrl = $vs.profilesReference.link `
-            -replace "https://localhost", "https://$BigIPHost`:$Port"
+        $profilesUrl = $vs.profilesReference.link -replace "https://localhost", $BaseUrl
+        $profiles = Invoke-BigIPGet $profilesUrl
 
-        $profilesData = Invoke-BigIPGet -Url $profilesUrl -Headers $Headers
-
-        if ($profilesData -and $profilesData.items) {
-            $httpProfile          = Get-ProfileFullPath $profilesData "http"
-            $tcpProfile           = Get-ProfileFullPath $profilesData "tcp"
-            $tcpAnalyticsProfile  = Get-ProfileFullPath $profilesData "tcp-analytics"
-            $httpAnalyticsProfile = Get-ProfileFullPath $profilesData "analytics"
-            $websocketProfile     = Get-ProfileFullPath $profilesData "websocket"
+        if ($profiles.items) {
+            $httpProfile          = Get-ProfileByList $profiles $HttpProfiles
+            $tcpProfile           = Get-ProfileByList $profiles $TcpProfiles
+            $tcpAnalyticsProfile  = Get-ProfileByList $profiles $TcpAnalyticsProfiles
+            $httpAnalyticsProfile = Get-ProfileByList $profiles $HttpAnalyticsProfiles
+            $websocketProfile     = Get-ProfileByList $profiles $WebsocketProfiles
         }
     }
 
     [PSCustomObject]@{
         name                 = $vs.name
-        creationTime         = $vs.creationTime
-        lastModifiedTime     = $vs.lastModifiedTime
         destinationIP        = $destinationIP
         destinationPort      = $destinationPort
         iRules               = $iRules
+        httpAnalyticsProfile = $httpAnalyticsProfile
         httpProfile          = $httpProfile
         tcpProfile           = $tcpProfile
         tcpAnalyticsProfile  = $tcpAnalyticsProfile
-        httpAnalyticsProfile = $httpAnalyticsProfile
         websocketProfile     = $websocketProfile
         connectionLimit      = $vs.connectionLimit
         rateLimit            = $vs.rateLimit
@@ -159,8 +151,5 @@ $csvData = foreach ($vs in $data.items) {
 # Export CSV
 # -------------------------
 
-$OutputFile = Join-Path (Get-Location) "Virtual_Servers_Export.csv"
-
-$csvData | Export-Csv -Path $OutputFile -NoTypeInformation -Encoding UTF8
-
-Write-Host "Virtual servers exported to $OutputFile"
+$csvData | Export-Csv "Virtual_Servers_Export.csv" -NoTypeInformation -Encoding UTF8
+Write-Host "Export completed successfully."
