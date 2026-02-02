@@ -49,69 +49,55 @@ function Invoke-BigIPGet {
 }
 
 # -------------------------
-# Get nodes for a VS via its pool
+# Get nodes from VS
 # -------------------------
 function Get-NodesFromVS {
     param ($vs)
 
-    if (-not $vs.poolReference -or -not $vs.poolReference.link) { return @() }
+    if (-not $vs.poolReference?.link) { return @() }
 
-    $poolUrl = $vs.poolReference.link -replace "https://localhost", $BaseUrl
-    $poolObj = Invoke-BigIPGet $poolUrl
-    if (-not $poolObj) { return @() }
+    $pool = Invoke-BigIPGet ($vs.poolReference.link -replace "https://localhost", $BaseUrl)
+    if (-not $pool.membersReference?.link) { return @() }
 
-    if (-not $poolObj.membersReference -or -not $poolObj.membersReference.link) { return @() }
-    $membersUrl = $poolObj.membersReference.link -replace "https://localhost", $BaseUrl
-    $membersObj = Invoke-BigIPGet $membersUrl
-    if (-not $membersObj.items) { return @() }
-
-    return $membersObj.items
+    $members = Invoke-BigIPGet ($pool.membersReference.link -replace "https://localhost", $BaseUrl)
+    return $members.items ?? @()
 }
 
 # -------------------------
-# Get ASM policies
+# ASM policies
 # -------------------------
-$asmData = Invoke-BigIPGet "$BaseUrl/mgmt/tm/asm/policies/"
 $asmPolicies = @{}
+$asmData = Invoke-BigIPGet "$BaseUrl/mgmt/tm/asm/policies"
 foreach ($p in $asmData.items) {
-    $asmPolicies[$p.name] = $p.fullPath
+    $asmPolicies[$p.name] = $true
 }
 
 # -------------------------
-# Get DoS profiles
+# DoS profiles
 # -------------------------
-$dosData = Invoke-BigIPGet "$BaseUrl/mgmt/tm/security/dos/profile"
 $dosProfiles = @{}
+$dosData = Invoke-BigIPGet "$BaseUrl/mgmt/tm/security/dos/profile"
 foreach ($d in $dosData.items) {
-    $dosProfiles[$d.name] = $d.fullPath
+    $dosProfiles[$d.name] = $true
 }
 
 # -------------------------
-# Get VS list
+# Virtual Servers
 # -------------------------
-$data = Invoke-BigIPGet $VSUrl
-if (-not $data.items) {
-    Write-Host "No virtual servers found."
-    exit 1
-}
+$vsData = Invoke-BigIPGet $VSUrl
+if (-not $vsData.items) { exit 1 }
 
-# -------------------------
-# Process each VS
-# -------------------------
-$csvData = foreach ($vs in $data.items) {
+$csvData = foreach ($vs in $vsData.items) {
 
-    # Parse VS IP and port
+    # VS IP / Port
     $vsIP = ""
     $vsPort = ""
-    if ($vs.destination) {
-        $dest = $vs.destination -replace '^/[^/]+/', ''
-        if ($dest -match '^(.*):(\d+)$') {
-            $vsIP = $matches[1]
-            $vsPort = $matches[2]
-        }
+    if ($vs.destination -match '^/[^/]+/(.+):(\d+)$') {
+        $vsIP = $matches[1]
+        $vsPort = $matches[2]
     }
 
-    # Parse tags from description
+    # Metadata from description
     $vsImportance = ""
     $ipPublic = ""
     $itOwner = ""
@@ -126,77 +112,62 @@ $csvData = foreach ($vs in $data.items) {
 
     # Pool members
     $members = Get-NodesFromVS $vs
-    if (-not $members) {
-        $members = @(@{ address = ""; name = "" })
-    }
+    if (-not $members) { $members = @(@{ address=""; name="" }) }
 
     # -------------------------
-    # Profiles attached directly to VS
+    # Profiles on VS
     # -------------------------
     $asmList = @()
     $dosList = @()
 
-    $vsProfilesData = Invoke-BigIPGet (
-        "$BaseUrl/mgmt/tm/ltm/virtual/~$($vs.partition)~$($vs.name)/profiles/"
+    $profiles = Invoke-BigIPGet (
+        "$BaseUrl/mgmt/tm/ltm/virtual/~$($vs.partition)~$($vs.name)/profiles"
     )
 
-    if ($vsProfilesData.items) {
-        foreach ($p in $vsProfilesData.items) {
-            $nameNormalized = $p.name -replace '^ASM_', ''
-            if ($asmPolicies.ContainsKey($nameNormalized)) {
-                $asmList += $nameNormalized
-            }
-            elseif ($dosProfiles.ContainsKey($p.name)) {
-                $dosList += $p.name
-            }
-        }
+    foreach ($p in $profiles.items) {
+        $norm = $p.name -replace '^ASM_', ''
+        if ($asmPolicies.ContainsKey($norm)) { $asmList += $norm }
+        if ($dosProfiles.ContainsKey($p.name)) { $dosList += $p.name }
     }
 
     # -------------------------
-    # LTM policies (ASM + DoS via rules)
+    # LTM policies (FIXED)
     # -------------------------
-    $policiesData = Invoke-BigIPGet (
-        "$BaseUrl/mgmt/tm/ltm/virtual/~$($vs.partition)~$($vs.name)/policies/"
+    $policies = Invoke-BigIPGet (
+        "$BaseUrl/mgmt/tm/ltm/virtual/~$($vs.partition)~$($vs.name)/policies"
     )
 
-    if ($policiesData.items) {
-        foreach ($pol in $policiesData.items) {
+    foreach ($pol in $policies.items) {
 
-            # Skip auto ASM policies
-            if ($pol.name -match '^asm_auto_l7_') { continue }
+        if ($pol.name -match '^asm_auto_l7_') { continue }
 
-            $rulesData = Invoke-BigIPGet (
-                "$BaseUrl/mgmt/tm/ltm/policy/$($pol.name)/rules"
+        $rules = Invoke-BigIPGet (
+            "$BaseUrl/mgmt/tm/ltm/policy/~$($pol.partition)~$($pol.name)/rules"
+        )
+
+        foreach ($r in $rules.items) {
+
+            if (-not $r.actionsReference?.link) { continue }
+
+            $actions = Invoke-BigIPGet (
+                $r.actionsReference.link -replace "https://localhost", $BaseUrl
             )
 
-            if (-not $rulesData.items) { continue }
+            foreach ($a in $actions.items) {
 
-            foreach ($r in $rulesData.items) {
-
-                if (-not $r.actionsReference -or -not $r.actionsReference.link) { continue }
-
-                $actionsData = Invoke-BigIPGet (
-                    $r.actionsReference.link -replace "https://localhost", $BaseUrl
-                )
-
-                if (-not $actionsData.items) { continue }
-
-                foreach ($a in $actionsData.items) {
-
-                    # ASM via LTM policy
-                    if ($a.asm -eq $true -and $a.policy) {
-                        $asmName = ($a.policy -split '/')[-1]
-                        if (-not $asmList.Contains($asmName)) {
-                            $asmList += $asmName
-                        }
+                # ASM via LTM
+                if ($a.asm -eq $true -and $a.policy) {
+                    $asmName = ($a.policy -split '/')[-1]
+                    if (-not $asmList.Contains($asmName)) {
+                        $asmList += $asmName
                     }
+                }
 
-                    # DoS L7 via LTM policy (IMPORTANT FIX)
-                    if ($a.dos -eq $true -and $a.fromProfile) {
-                        $dosName = ($a.fromProfile -split '/')[-1]
-                        if (-not $dosList.Contains($dosName)) {
-                            $dosList += $dosName
-                        }
+                # DoS L7 via LTM (CRITICAL FIX)
+                if ($a.dos -eq $true -and $a.fromProfile) {
+                    $dosName = ($a.fromProfile -split '/')[-1]
+                    if (-not $dosList.Contains($dosName)) {
+                        $dosList += $dosName
                     }
                 }
             }
@@ -207,12 +178,6 @@ $csvData = foreach ($vs in $data.items) {
     $dosList = ($dosList | Sort-Object -Unique) -join ';'
 
     foreach ($m in $members) {
-        $nodeIP = $m.address
-        $nodePort = ""
-        if ($m.name -match ':(\d+)$') {
-            $nodePort = $matches[1]
-        }
-
         [PSCustomObject]@{
             VS_Importance   = $vsImportance
             It_owner        = $itOwner
@@ -221,8 +186,8 @@ $csvData = foreach ($vs in $data.items) {
             IP_Public       = $ipPublic
             VS_IP           = $vsIP
             VS_Port         = $vsPort
-            Node_IP         = $nodeIP
-            Node_Port       = $nodePort
+            Node_IP         = $m.address
+            Node_Port       = ($m.name -match ':(\d+)$') ? $matches[1] : ""
             ASM_Policies    = $asmList
             DOS_Policies    = $dosList
         }
@@ -230,7 +195,7 @@ $csvData = foreach ($vs in $data.items) {
 }
 
 # -------------------------
-# Export CSV
+# Export
 # -------------------------
 $csvData | Export-Csv "BIGIP_VS_Nodes.csv" -NoTypeInformation -Encoding UTF8
 Write-Host "Export completed: BIGIP_VS_Nodes.csv"
