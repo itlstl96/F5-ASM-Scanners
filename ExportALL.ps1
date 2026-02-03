@@ -32,9 +32,14 @@ $Headers = @{ Authorization = "Basic $AuthHeader" }
 # ASM policies to exclude from hostname extraction
 # -------------------------
 $ExcludedAsmHostnamePolicies = @(
-    "PolicyX",
+    "Copie3",
     "PolicyZ"
 )
+
+# -------------------------
+# Custom VS Importance order
+# -------------------------
+$importanceOrder = @("Critic","Important","Mediu","Non-Prod")
 
 # -------------------------
 # Generic GET
@@ -264,7 +269,9 @@ $csvData = foreach ($vs in $data.items) {
 }
 
 # -------------------------
-# Export CSV
+# Sort CSV by VS_Importance order before export
 # -------------------------
-$csvData | Export-Csv "BIGIP_VS_Nodes.csv" -NoTypeInformation -Encoding UTF8
+$csvData | Sort-Object @{Expression={ [array]::IndexOf($importanceOrder,$_."VS_Importance") }; Ascending=$true} |
+    Export-Csv "BIGIP_VS_Nodes.csv" -NoTypeInformation -Encoding UTF8
+
 Write-Host "Export completed: BIGIP_VS_Nodes.csv"
