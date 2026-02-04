@@ -29,6 +29,12 @@ $AuthHeader = [Convert]::ToBase64String(
 $Headers = @{ Authorization = "Basic $AuthHeader" }
 
 # -------------------------
+# Config
+# -------------------------
+$ExcludedAsmHostnamePolicies = @("Copie3","PolicyZ")
+$importanceOrder = @("Critic","Important","Mediu","Non-Prod")
+
+# -------------------------
 # Generic GET
 # -------------------------
 function Invoke-BigIPGet {
@@ -38,56 +44,120 @@ function Invoke-BigIPGet {
         $req.Method = "GET"
         $req.Headers["Authorization"] = $Headers.Authorization
         $req.Accept = "application/json"
-
         $resp = $req.GetResponse()
         $reader = New-Object IO.StreamReader($resp.GetResponseStream())
         $reader.ReadToEnd() | ConvertFrom-Json
-    }
-    catch {
+    } catch {
         $null
     }
 }
 
 # -------------------------
-# Get nodes for a VS via its pool
+# Pool members
 # -------------------------
 function Get-NodesFromVS {
     param ($vs)
 
-    if (-not $vs.poolReference -or -not $vs.poolReference.link) { return @() }
+    if (-not $vs.poolReference.link) {
+        return @(@{ address=""; name="" })
+    }
 
-    $poolUrl = $vs.poolReference.link -replace "https://localhost", $BaseUrl
-    $poolObj = Invoke-BigIPGet $poolUrl
-    if (-not $poolObj) { return @() }
+    $pool = Invoke-BigIPGet ($vs.poolReference.link -replace "https://localhost", $BaseUrl)
+    if (-not $pool.membersReference.link) {
+        return @(@{ address=""; name="" })
+    }
 
-    if (-not $poolObj.membersReference -or -not $poolObj.membersReference.link) { return @() }
-    $membersUrl = $poolObj.membersReference.link -replace "https://localhost", $BaseUrl
-    $membersObj = Invoke-BigIPGet $membersUrl
-    if (-not $membersObj.items) { return @() }
-
-    return $membersObj.items
+    (Invoke-BigIPGet ($pool.membersReference.link -replace "https://localhost", $BaseUrl)).items
 }
 
 # -------------------------
-# Get ASM policies
+# LTM rule conditions (REFINED)
 # -------------------------
-$asmData = Invoke-BigIPGet "$BaseUrl/mgmt/tm/asm/policies/"
+function Get-LtmRuleConditions {
+    param (
+        [string]$PolicyPartition,
+        [string]$PolicyName,
+        [string]$RuleName
+    )
+
+    $url = "$BaseUrl/mgmt/tm/ltm/policy/~$PolicyPartition~$PolicyName/rules/$RuleName/conditions"
+    $data = Invoke-BigIPGet $url
+
+    if (-not $data.items) { return "*" }
+
+    $out = @()
+
+    foreach ($c in $data.items) {
+
+        # HTTP Host (always equality in practice)
+        if ($c.httpHost -eq $true -and $c.values) {
+            $out += "host == (" + ($c.values -join ",") + ")"
+        }
+
+        # HTTP URI
+        if ($c.httpUri -eq $true -and $c.values) {
+
+            if ($c.equals -eq $true) {
+                $out += "uri == (" + ($c.values -join ",") + ")"
+            }
+            elseif ($c.startsWith -eq $true) {
+                # normalize startsWith to wildcard syntax
+                $vals = $c.values | ForEach-Object { "$_*" }
+                $out += "uri == (" + ($vals -join ",") + ")"
+            }
+        }
+    }
+
+    if ($out.Count -eq 0) { return "*" }
+    $out -join " && "
+}
+
+# -------------------------
+# ASM policies + hostname cache
+# -------------------------
 $asmPolicies = @{}
+$asmData = Invoke-BigIPGet "$BaseUrl/mgmt/tm/asm/policies/"
 foreach ($p in $asmData.items) {
-    $asmPolicies[$p.name] = $p.fullPath
+    $asmPolicies[$p.name] = $p.id
+}
+
+$asmHostCache = @{}
+
+function Get-AsmHostNames {
+    param ($PolicyName)
+
+    if ($asmHostCache.ContainsKey($PolicyName)) {
+        return $asmHostCache[$PolicyName]
+    }
+
+    if (-not $asmPolicies.ContainsKey($PolicyName)) {
+        $asmHostCache[$PolicyName] = @()
+        return @()
+    }
+
+    $id = $asmPolicies[$PolicyName]
+    $hosts = @()
+
+    $data = Invoke-BigIPGet "$BaseUrl/mgmt/tm/asm/policies/$id/host-names"
+    foreach ($h in $data.items) {
+        if ($h.name) { $hosts += $h.name }
+    }
+
+    $asmHostCache[$PolicyName] = $hosts
+    $hosts
 }
 
 # -------------------------
-# Get L7 DoS profiles
+# DoS profiles
 # -------------------------
-$dosData = Invoke-BigIPGet "$BaseUrl/mgmt/tm/security/dos/profile"
 $dosProfiles = @{}
+$dosData = Invoke-BigIPGet "$BaseUrl/mgmt/tm/security/dos/profile"
 foreach ($d in $dosData.items) {
     $dosProfiles[$d.name] = $d.fullPath
 }
 
 # -------------------------
-# Get VS list
+# Get Virtual Servers
 # -------------------------
 $data = Invoke-BigIPGet $VSUrl
 if (-not $data.items) {
@@ -96,147 +166,145 @@ if (-not $data.items) {
 }
 
 # -------------------------
-# Process each VS
+# MAIN
 # -------------------------
 $csvData = foreach ($vs in $data.items) {
 
-    # Parse VS IP and port
-    $vsIP = ""
-    $vsPort = ""
-    if ($vs.destination) {
-        $dest = $vs.destination -replace '^/[^/]+/', ''
-        if ($dest -match '^(.*):(\d+)$') {
-            $vsIP = $matches[1]
-            $vsPort = $matches[2]
-        }
+    # VS IP / Port
+    $vsIP = ""; $vsPort = ""
+    if ($vs.destination -match '^(.*):(\d+)$') {
+        $vsIP = ($matches[1] -replace '^/[^/]+/','')
+        $vsPort = $matches[2]
     }
 
-    # Parse metadata from description
+    # Description tags
     $vsImportance = ""
     $ipPublic = ""
     $itOwner = ""
     $businessOwner = ""
+    $waap = ""
 
     if ($vs.description) {
         if ($vs.description -match '\[utilizare\]:\[(.*?)\]') { $vsImportance = $matches[1] }
         if ($vs.description -match '\[ip_public\]:\[(.*?)\]') { $ipPublic = $matches[1] }
         if ($vs.description -match '\[it_owner\]:\[(.*?)\]') { $itOwner = $matches[1] }
         if ($vs.description -match '\[business_owner\]:\[(.*?)\]') { $businessOwner = $matches[1] }
+        if ($vs.description -match '\[waap\]:\[(.*?)\]') { $waap = $matches[1] }
     }
 
-    # Pool members
     $members = Get-NodesFromVS $vs
-    if (-not $members) {
-        $members = @(@{ address=""; name="" })
+    $rows = @()
+
+    # -------------------------
+    # Direct profiles
+    # -------------------------
+    $directAsm = @()
+    $directDos = @()
+
+    $profiles = Invoke-BigIPGet "$BaseUrl/mgmt/tm/ltm/virtual/~$($vs.partition)~$($vs.name)/profiles/"
+    foreach ($p in $profiles.items) {
+        $asmName = $p.name -replace '^ASM_', ''
+        if ($asmPolicies.ContainsKey($asmName)) { $directAsm += $asmName }
+        elseif ($dosProfiles.ContainsKey($p.name)) { $directDos += $p.name }
     }
 
-    # -------------------------
-    # Direct profiles on VS
-    # -------------------------
-    $asmList = @()
-    $dosList = @()
+    if ($directAsm -or $directDos) {
 
-    $vsProfilesData = Invoke-BigIPGet (
-        "$BaseUrl/mgmt/tm/ltm/virtual/~$($vs.partition)~$($vs.name)/profiles/"
-    )
+        $hostNames = @()
+        foreach ($a in $directAsm) {
+            if ($ExcludedAsmHostnamePolicies -notcontains $a) {
+                $hostNames += Get-AsmHostNames $a
+            }
+        }
 
-    if ($vsProfilesData.items) {
-        foreach ($p in $vsProfilesData.items) {
-            $asmName = $p.name -replace '^ASM_', ''
-            if ($asmPolicies.ContainsKey($asmName)) {
-                $asmList += $asmName
-            }
-            elseif ($dosProfiles.ContainsKey($p.name)) {
-                $dosList += $p.name
-            }
+        $rows += [PSCustomObject]@{
+            Condition             = "*"
+            ASM_Policies          = ($directAsm | Sort-Object -Unique) -join ';'
+            DOS_Policies          = ($directDos | Sort-Object -Unique) -join ';'
+            ASM_Allowed_Hostnames = ($hostNames | Sort-Object -Unique) -join ';'
         }
     }
 
     # -------------------------
-    # ASM / DoS via LTM policies
+    # LTM policy rules
     # -------------------------
-    $policiesData = Invoke-BigIPGet (
-        "$BaseUrl/mgmt/tm/ltm/virtual/~$($vs.partition)~$($vs.name)/policies/"
-    )
+    $policies = Invoke-BigIPGet "$BaseUrl/mgmt/tm/ltm/virtual/~$($vs.partition)~$($vs.name)/policies/"
 
-    if ($policiesData.items) {
-        foreach ($pol in $policiesData.items) {
+    foreach ($pol in $policies.items) {
 
-            if ($pol.name -match '^asm_auto_l7_') { continue }
+        if ($pol.name -match '^asm_auto_l7_') { continue }
 
-            $policyPath = "~$($pol.partition)~$($pol.name)"
-            $rulesData = Invoke-BigIPGet (
-                "$BaseUrl/mgmt/tm/ltm/policy/$policyPath/rules"
-            )
+        $rules = Invoke-BigIPGet "$BaseUrl/mgmt/tm/ltm/policy/~$($pol.partition)~$($pol.name)/rules"
 
-            if (-not $rulesData.items) { continue }
+        foreach ($r in $rules.items) {
 
-            foreach ($r in $rulesData.items) {
+            $asmForRule = @()
+            $dosForRule = @()
 
-                if (-not $r.actionsReference -or -not $r.actionsReference.link) { continue }
+            $actions = Invoke-BigIPGet ($r.actionsReference.link -replace "https://localhost", $BaseUrl)
 
-                $actionsData = Invoke-BigIPGet (
-                    $r.actionsReference.link -replace "https://localhost", $BaseUrl
-                )
+            foreach ($a in $actions.items) {
+                if ($a.asm -eq $true -and $a.policy) {
+                    $asmForRule += ($a.policy -split '/')[-1]
+                }
+                if ($a.l7dos -eq $true -and $a.fromProfile) {
+                    $dosForRule += ($a.fromProfile -split '/')[-1]
+                }
+            }
 
-                if (-not $actionsData.items) { continue }
+            if ($asmForRule -or $dosForRule) {
 
-                foreach ($a in $actionsData.items) {
-
-                    # ASM via LTM policy
-                    if (
-                        ($a.asm -eq $true -or $a.asm -eq "true") -and
-                        $a.policy
-                    ) {
-                        $asmName = ($a.policy -split '/')[-1]
-                        if (-not $asmList.Contains($asmName)) {
-                            $asmList += $asmName
-                        }
+                $hostNames = @()
+                foreach ($a in $asmForRule) {
+                    if ($ExcludedAsmHostnamePolicies -notcontains $a) {
+                        $hostNames += Get-AsmHostNames $a
                     }
+                }
 
-                    # L7 DoS via LTM policy
-                    if (
-                        ($a.l7dos -eq $true -or $a.l7dos -eq "true") -and
-                        $a.fromProfile
-                    ) {
-                        $dosName = ($a.fromProfile -split '/')[-1]
-                        if (-not $dosList.Contains($dosName)) {
-                            $dosList += $dosName
-                        }
-                    }
+                $rows += [PSCustomObject]@{
+                    Condition             = Get-LtmRuleConditions `
+                                              -PolicyPartition $pol.partition `
+                                              -PolicyName $pol.name `
+                                              -RuleName $r.name
+                    ASM_Policies          = ($asmForRule | Sort-Object -Unique) -join ';'
+                    DOS_Policies          = ($dosForRule | Sort-Object -Unique) -join ';'
+                    ASM_Allowed_Hostnames = ($hostNames | Sort-Object -Unique) -join ';'
                 }
             }
         }
     }
 
-    $asmList = ($asmList | Sort-Object -Unique | Where-Object { $_ -ne "websecurity" }) -join ';'
-    $dosList = ($dosList | Sort-Object -Unique) -join ';'
+    # -------------------------
+    # Emit CSV rows
+    # -------------------------
+    foreach ($row in $rows) {
+        foreach ($m in $members) {
 
-    foreach ($m in $members) {
-        $nodeIP = $m.address
-        $nodePort = ""
-        if ($m.name -match ':(\d+)$') {
-            $nodePort = $matches[1]
-        }
-
-        [PSCustomObject]@{
-            VS_Importance   = $vsImportance
-            It_owner        = $itOwner
-            Business_owner  = $businessOwner
-            VS_Name         = $vs.name
-            IP_Public       = $ipPublic
-            VS_IP           = $vsIP
-            VS_Port         = $vsPort
-            Node_IP         = $nodeIP
-            Node_Port       = $nodePort
-            ASM_Policies    = $asmList
-            DOS_Policies    = $dosList
+            [PSCustomObject]@{
+                VS_Importance         = $vsImportance
+                It_owner              = $itOwner
+                Business_owner        = $businessOwner
+                WAAP                  = $waap
+                Condition             = $row.Condition
+                ASM_Allowed_Hostnames = $row.ASM_Allowed_Hostnames
+                VS_Name               = $vs.name
+                IP_Public             = $ipPublic
+                VS_IP                 = $vsIP
+                VS_Port               = $vsPort
+                Node_IP               = $m.address
+                Node_Port             = ($m.name -replace '.*:','')
+                ASM_Policies          = $row.ASM_Policies
+                DOS_Policies          = $row.DOS_Policies
+            }
         }
     }
 }
 
 # -------------------------
-# Export CSV
+# Export
 # -------------------------
-$csvData | Export-Csv "BIGIP_VS_Nodes.csv" -NoTypeInformation -Encoding UTF8
-Write-Host "Export completed: BIGIP_VS_Nodes.csv"
+$csvData |
+    Sort-Object @{ Expression = { [array]::IndexOf($importanceOrder, $_.VS_Importance) } } |
+    Export-Csv "BIGIP_VS_Conditions.csv" -NoTypeInformation -Encoding UTF8
+
+Write-Host "Export completed: BIGIP_VS_Conditions.csv"
