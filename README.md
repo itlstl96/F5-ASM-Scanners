@@ -2,9 +2,7 @@ The following repo requires admin/api access to BigIP in order to check for misc
 
 The environment was PowerShell 5 with BigIP 17.1.5
 
-===============
 ===Exporters===
-===============
 
 Usually the exporters do not need an input list of any type. And will generate a list that can be used for scanners.
 
@@ -25,9 +23,9 @@ Usually the exporters do not need an input list of any type. And will generate a
 	- Logging / Analytics profiles
 
 
-==============
+
 ===Scanners===
-==============
+
 
 Scanners will require a list as input (ASM, DOS etc). Usually exported from exporter menu.
 
